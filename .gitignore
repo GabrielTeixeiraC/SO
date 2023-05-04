@@ -1,4 +1,6 @@
+/tests/
 /.vscode/
+dccthread.o
 dlist.o
 main.o
 main
