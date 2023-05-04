@@ -68,36 +68,25 @@ dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) 
 }
 
 void dccthread_yield(void) {
-	printf("yield\n");
 	dccthread_t *current_thread = dccthread_self();
 	current_thread->yielded = 1;
 	swapcontext(&current_thread->context, &manager);
-	printf("yield end\n");
 }
 
 void dccthread_exit(void) {
-	printf("exit\n");
 	dccthread_t *current_thread = dccthread_self();
 	struct dnode *node = threads->head;
 
 	while (node != NULL) {
-		// print node name
-		printf("%s\n", ((dccthread_t *) node->data)->name);
-
 		dccthread_t *thread = node->data;
 		if (thread->waited_thread == current_thread) {
 			thread->waited_thread = NULL;
 		}
 		node = node->next;
 	}
-
-	free(current_thread->context.uc_stack.ss_sp);
-	free(current_thread);
-	printf("%s exited\n", current_thread->name);
 }
 
 void dccthread_wait(dccthread_t *tid) {
-	printf("wait\n");
 	struct dnode *node = threads->head;
 
 	while (node != NULL) {
@@ -115,7 +104,6 @@ void dccthread_wait(dccthread_t *tid) {
 	dccthread_t *current_thread = dccthread_self();
 	current_thread->waited_thread = tid;
 	swapcontext(&current_thread->context, &manager);
-	printf("wait end\n");
 }
 
 void dccthread_sleep(struct timespec ts) {
