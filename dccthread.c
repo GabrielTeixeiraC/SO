@@ -10,13 +10,13 @@
 
 struct dccthread {
 	char name[MAX_THREAD_NAME_SIZE];
-	ucontext_t context;
+	ucontext_t * context;
 	int yielded;
 	dccthread_t * waited_thread;
 };
 
 ucontext_t manager;
-struct dlist *threads;
+struct dlist * threads;
 
 void dccthread_init(void (*func)(int), int param) {
 	threads = dlist_create();
@@ -32,7 +32,7 @@ void dccthread_init(void (*func)(int), int param) {
 			continue;
 		}
 
-		swapcontext(&manager, &thread->context);
+		swapcontext(&manager, thread->context);
 		dlist_pop_left(threads);
 
 		if (thread->yielded || thread->waited_thread != NULL) {
@@ -51,17 +51,17 @@ dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) 
 	thread->yielded = 0;
 	thread->waited_thread = NULL;
 	
-	ucontext_t context;
-	getcontext(&context);
-	context.uc_link = &manager;
-	context.uc_stack.ss_sp = malloc(STACK_SIZE);
-	context.uc_stack.ss_size = STACK_SIZE;
+	ucontext_t * context = malloc(sizeof(ucontext_t));
+	getcontext(context);
+	context->uc_link = &manager;
+	context->uc_stack.ss_sp = malloc(STACK_SIZE);
+	context->uc_stack.ss_size = STACK_SIZE;
 
 	thread->context = context;
 
 	dlist_push_right(threads, thread);
 
-	makecontext(&thread->context, (void (*)()) func, 1, param);
+	makecontext(thread->context, (void (*)()) func, 1, param);
 
 	return thread;
 
@@ -70,7 +70,7 @@ dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) 
 void dccthread_yield(void) {
 	dccthread_t *current_thread = dccthread_self();
 	current_thread->yielded = 1;
-	swapcontext(&current_thread->context, &manager);
+	swapcontext(current_thread->context, &manager);
 }
 
 void dccthread_exit(void) {
@@ -84,6 +84,8 @@ void dccthread_exit(void) {
 		}
 		node = node->next;
 	}
+	
+	free(current_thread);
 }
 
 void dccthread_wait(dccthread_t *tid) {
@@ -103,7 +105,7 @@ void dccthread_wait(dccthread_t *tid) {
 
 	dccthread_t *current_thread = dccthread_self();
 	current_thread->waited_thread = tid;
-	swapcontext(&current_thread->context, &manager);
+	swapcontext(current_thread->context, &manager);
 }
 
 void dccthread_sleep(struct timespec ts) {
