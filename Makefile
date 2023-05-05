@@ -5,7 +5,7 @@ INC = .
 OBJS = main.o dlist.o dccthread.o
 HDRS = $(INC)/dlist.h $(INC)/dccthread.h
 
-CFLAGS = -Wall -g -c -I$(INC)
+CFLAGS = -Wall -lrt -g -c -I$(INC)
 
 EXE = main
 
