@@ -16,7 +16,6 @@
 struct dccthread {
 	char name[MAX_THREAD_NAME_SIZE];
 	ucontext_t * context;
-	int yielded;
 	dccthread_t * waited_thread;
 };
 
@@ -26,6 +25,19 @@ struct dlist * sleeping_threads;
 sigset_t mask;
 
 dccthread_t * current_thread;
+
+void print_all_threads() {
+	printf("threads: %d, sleeping_threads: %d\n", threads->count, sleeping_threads->count);
+	for (int i = 0; i < threads->count; i++) {
+		dccthread_t *thread = dlist_get_index(threads, i);
+		printf("thread %s\n", thread->name);
+	}
+	printf("______________________________________\n");
+	for (int i = 0; i < sleeping_threads->count; i++) {
+		dccthread_t *thread = dlist_get_index(sleeping_threads, i);
+		printf("sleeping thread %s\n", thread->name);
+	}
+}
 
 int find_thread_in_lists(dccthread_t * thread) {
 	struct dnode * node = threads->head;
@@ -81,34 +93,26 @@ void dccthread_init(void (*func)(int), int param) {
 
 	timer_settime(timer_id, 0, &ts, NULL);
 
+	printf("threads: %d, sleeping_threads: %d, thread %s running\n", threads->count, sleeping_threads->count, dccthread_name(dccthread_self()));
 	while (!dlist_empty(threads) || !dlist_empty(sleeping_threads)) {
 		dccthread_t * current_thread = dlist_get_index(threads, 0);
-		if (dlist_empty(threads)) {
-			current_thread = dlist_get_index(sleeping_threads, 0);
-		}
-		printf("threads: %d, sleeping_threads: %d, thread %s running\n", threads->count, sleeping_threads->count, current_thread->name);
-		
+
 		if (current_thread->waited_thread != NULL) {
 			dlist_push_right(threads, current_thread);
 			dlist_pop_left(threads);
 			continue;
 		}
 
-		// printf("threads: %d, sleeping_threads: %d, thread %s running\n", threads->count, sleeping_threads->count, current_thread->name);
 		swapcontext(&manager, current_thread->context);
-		
 		dlist_pop_left(threads);
 
-		if (current_thread->yielded || current_thread->waited_thread != NULL) {
-			current_thread->yielded = 0;
+		if (current_thread->waited_thread != NULL) {
 			dlist_push_right(threads, current_thread);
 		}
+		print_all_threads();
 	}
 
-	if (timer_delete(timer_id) == -1) {
-    perror("Error deleting timer");
-    exit(EXIT_FAILURE);
-  }
+	timer_delete(timer_id);
 
 	dlist_destroy(threads, NULL);
 	dlist_destroy(sleeping_threads, NULL);
@@ -129,9 +133,7 @@ dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) 
 
 	strcpy(thread->name, name);
 	thread->context = context;
-	thread->yielded = 0;
 	thread->waited_thread = NULL;
-
 	dlist_push_right(threads, thread);
 
 	makecontext(thread->context, (void (*)()) func, 1, param);
@@ -144,8 +146,6 @@ dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) 
 void dccthread_yield(void) {
 	sigprocmask(SIG_BLOCK, &mask, NULL);
 	dccthread_t * current_thread = dlist_get_index(threads, 0);
-	current_thread->yielded = 1;
-	// printf("threads: %d, sleeping_threads: %d, thread %s yielding to manager\n", threads->count, sleeping_threads->count, current_thread->name);
 	swapcontext(current_thread->context, &manager);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
@@ -153,27 +153,22 @@ void dccthread_yield(void) {
 void dccthread_exit(void) {
 	sigprocmask(SIG_BLOCK, &mask, NULL);
 	dccthread_t * current_thread = dlist_get_index(threads, 0);
-	// printf("threads: %d, sleeping_threads: %d, thread %s exiting\n", threads->count - 1, sleeping_threads->count, current_thread->name);
 
 	for (int i = 0; i < threads->count; i++) {
-		// printf("i: %d\n", i);
 		dccthread_t *thread = dlist_get_index(threads, i);
 		if (thread->waited_thread == current_thread) {
-			printf("threads: %d, sleeping_threads: %d, thread %s waking up\n", threads->count - 1, sleeping_threads->count, thread->name);
-			// thread->waited_thread = NULL;
+			thread->waited_thread = NULL;
 		}
 	}
 	
-	// printf("threads: %d, sleeping_threads: %d, thread %s freeing\n", threads->count - 1, sleeping_threads->count, current_thread->name);
 	for (int i = 0; i < sleeping_threads->count; i++) {
 		dccthread_t *thread = dlist_get_index(sleeping_threads, i);
 		if (thread->waited_thread == current_thread) {
-			// thread->waited_thread = NULL;
+			thread->waited_thread = NULL;
 		}
 	}
 	
 	free(current_thread);
-	// printf("freed!\n");
 	swapcontext(current_thread->context, &manager);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
@@ -184,12 +179,9 @@ void dccthread_wait(dccthread_t *tid) {
 	if (!find_thread_in_lists(tid)) {
 		return;
 	}
-
+	
 	dccthread_t * current_thread = dlist_get_index(threads, 0);
-
-	current_thread->waited_thread = tid;
-
-	// printf("threads: %d, sleeping_threads: %d, thread %s waiting for thread %s\n", threads->count, sleeping_threads->count, current_thread->name, tid->name);
+	current_thread->waited_thread = tid;	
 	swapcontext(current_thread->context, &manager);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
@@ -214,12 +206,12 @@ void dccthread_wakeup() {
 	// 	}
 	// 	node = node->next;
 	// }
-	dccthread_t *current_thread = dlist_get_index(sleeping_threads, 0);
-	// printf("threads: %d, sleeping_threads: %d, thread %s waking up\n", threads->count, sleeping_threads->count, thread->name);
-	dlist_pop_left(sleeping_threads);
-	dlist_push_right(threads, current_thread);
+	dccthread_t *sleeping_thread = dlist_get_index(sleeping_threads, 0);
 
-	// printf("threads: %d, sleeping_threads: %d, thread %s woke up\n", threads->count, sleeping_threads->count, thread->name);
+	dlist_pop_left(sleeping_threads);
+	dlist_push_right(threads, sleeping_thread);
+
+
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
 
@@ -250,7 +242,6 @@ void dccthread_sleep(struct timespec ts) {
 
 	dlist_push_right(sleeping_threads, current_thread);
 
-	// printf("threads: %d, sleeping_threads: %d, thread %s sleeping\n", threads->count, sleeping_threads->count, current_thread->name);
 	swapcontext(current_thread->context, &manager);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
