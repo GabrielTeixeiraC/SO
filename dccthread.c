@@ -24,8 +24,6 @@ struct dlist * threads;
 struct dlist * sleeping_threads;
 sigset_t mask;
 
-dccthread_t * current_thread;
-
 void print_all_threads() {
 	printf("threads: %d, sleeping_threads: %d\n", threads->count, sleeping_threads->count);
 	for (int i = 0; i < threads->count; i++) {
@@ -37,6 +35,7 @@ void print_all_threads() {
 		dccthread_t *thread = dlist_get_index(sleeping_threads, i);
 		printf("sleeping thread %s\n", thread->name);
 	}
+	printf("\n\n");
 }
 
 int find_thread_in_lists(dccthread_t * thread) {
@@ -76,7 +75,7 @@ void dccthread_init(void (*func)(int), int param) {
   se.sigev_value.sival_ptr = &timer_id;
   
   sa.sa_flags = 0;
-  sa.sa_handler = (void *) dccthread_yield;
+  sa.sa_sigaction = (void *) dccthread_yield;
   
   ts.it_interval.tv_sec = TIMER_INTERVAL_SEC;
   ts.it_interval.tv_nsec = TIMER_INTERVAL_NSEC;
@@ -93,7 +92,7 @@ void dccthread_init(void (*func)(int), int param) {
 
 	timer_settime(timer_id, 0, &ts, NULL);
 
-	printf("threads: %d, sleeping_threads: %d, thread %s running\n", threads->count, sleeping_threads->count, dccthread_name(dccthread_self()));
+	// printf("threads: %d, sleeping_threads: %d, thread %s running\n", threads->count, sleeping_threads->count, dccthread_name(dccthread_self()));
 	while (!dlist_empty(threads) || !dlist_empty(sleeping_threads)) {
 		dccthread_t * current_thread = dlist_get_index(threads, 0);
 
@@ -146,6 +145,7 @@ dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) 
 void dccthread_yield(void) {
 	sigprocmask(SIG_BLOCK, &mask, NULL);
 	dccthread_t * current_thread = dlist_get_index(threads, 0);
+	dlist_push_right(threads, current_thread);
 	swapcontext(current_thread->context, &manager);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
@@ -193,24 +193,12 @@ int cmp (const void * a, const void * b, void * param) {
 	return (thread_a != thread_b);
 }
 
-void dccthread_wakeup() {
+void dccthread_wakeup(int sig, siginfo_t *si, void *uc) {
 	sigprocmask(SIG_BLOCK, &mask, NULL);
-
-	// struct dnode *node = sleeping_threads->head; 
-	// while (node != NULL) {
-	// 	dccthread_t *thread = node->data;
-	// 	if (thread == (dccthread_t *)si->si_value.sival_ptr){
-	// 		dlist_find_remove(sleeping_threads, node, cmp, NULL);
-	// 		dlist_push_right(threads, thread);
-	// 		break;
-	// 	}
-	// 	node = node->next;
-	// }
-	dccthread_t *sleeping_thread = dlist_get_index(sleeping_threads, 0);
-
-	dlist_pop_left(sleeping_threads);
-	dlist_push_right(threads, sleeping_thread);
-
+	
+	dccthread_t *thread = (dccthread_t *) si->si_value.sival_ptr;
+	dlist_find_remove(sleeping_threads, thread, cmp, NULL);
+	dlist_push_right(threads, thread);
 
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
