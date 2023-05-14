@@ -8,22 +8,27 @@
 #include "dlist.h"
 #include "dccthread.h"
 
-#define STACK_SIZE 1024*1024
-#define MAX_THREAD_NAME_SIZE 128
-#define TIMER_INTERVAL_SEC 0
-#define TIMER_INTERVAL_NSEC 10000000
+#define STACK_SIZE 128*128
+#define MAX_THREAD_NAME_SIZE 200
+#define TIMER_SEC_INTERVAL 0
+#define TIMER_NSEC_INTERVAL 10000000
 
 // Thread structure
 struct dccthread {
 	char name[MAX_THREAD_NAME_SIZE];
 	ucontext_t * context;
 	dccthread_t * waited_thread;
+	int yielded;
 };
 
 // Global variables
 ucontext_t manager;
+
 struct dlist * threads;
 struct dlist * sleeping_threads;
+
+timer_t st;
+
 sigset_t mask;
 sigset_t sleepmask;
 
@@ -82,23 +87,29 @@ void dccthread_init(void (*func)(int), int param) {
   sa.sa_flags = 0;
   sa.sa_handler = (void *) dccthread_yield;
   
-  ts.it_interval.tv_sec = TIMER_INTERVAL_SEC;
-  ts.it_interval.tv_nsec = TIMER_INTERVAL_NSEC;
-  ts.it_value.tv_sec = TIMER_INTERVAL_SEC;
-  ts.it_value.tv_nsec = TIMER_INTERVAL_NSEC;
+  ts.it_interval.tv_sec = TIMER_SEC_INTERVAL;
+  ts.it_interval.tv_nsec = TIMER_NSEC_INTERVAL;
+  ts.it_value.tv_sec = TIMER_SEC_INTERVAL;
+  ts.it_value.tv_nsec = TIMER_NSEC_INTERVAL;
   
 	sigaction(SIGRTMIN, &sa, NULL);
 
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGRTMIN);
   sigemptyset(&sleepmask);
-  sigaddset(&sleepmask, SIGRTMAX);
+  sigaddset(&sleepmask, SIGALRM);
 
 	sigprocmask(SIG_BLOCK, &mask, NULL);
 
-	timer_create(CLOCK_PROCESS_CPUTIME_ID, &se, &timer_id);
+	if (timer_create(CLOCK_REALTIME, &se, &timer_id) != 0) {
+		perror("timer_create");
+		exit(1);
+	}	
 
-	timer_settime(timer_id, 0, &ts, NULL);
+	if (timer_settime(timer_id, 0, &ts, NULL) != 0) {
+		perror("timer_settime");
+		exit(1);
+	}
 
 	while (!dlist_empty(threads) || !dlist_empty(sleeping_threads)) {
     sigprocmask(SIG_UNBLOCK, &sleepmask, NULL);
@@ -114,12 +125,21 @@ void dccthread_init(void (*func)(int), int param) {
 		swapcontext(&manager, current_thread->context);
 		dlist_pop_left(threads);
 
-		if (current_thread->waited_thread != NULL) {
+		if (current_thread->waited_thread != NULL || current_thread->yielded) {
+			current_thread->yielded = 0;
 			dlist_push_right(threads, current_thread);
 		}
 	}
 
-	timer_delete(timer_id);
+	if (timer_delete(timer_id) != 0) {
+		perror("preemption timer delete");
+		exit(1);
+	}
+
+	if (timer_delete(st) != 0) {
+		perror("sleep timer delete");
+		exit(1);
+	}
 
 	dlist_destroy(threads, NULL);
 	dlist_destroy(sleeping_threads, NULL);
@@ -130,21 +150,35 @@ void dccthread_init(void (*func)(int), int param) {
 // Creates a new thread
 dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) {
 	ucontext_t * context = malloc(sizeof(ucontext_t));
+	if (context == NULL) {
+		perror("context malloc error");
+		exit(1);
+	}
+
 	getcontext(context);
 
 	sigprocmask(SIG_BLOCK, &mask, NULL);
+
 	context->uc_link = &manager;
 	context->uc_stack.ss_sp = malloc(STACK_SIZE);
+	if (context->uc_stack.ss_sp == NULL) {
+		perror("stack malloc error");
+		exit(1);
+	}
 	context->uc_stack.ss_size = STACK_SIZE;
-
 	dccthread_t *thread = malloc(sizeof(dccthread_t));
+	if (thread == NULL) {
+		perror("thread malloc error");
+		exit(1);
+	}
 
 	strcpy(thread->name, name);
 	thread->context = context;
 	thread->waited_thread = NULL;
+	thread->yielded = 0;
 	dlist_push_right(threads, thread);
 
-	makecontext(thread->context, (void (*)()) func, 1, param);
+	makecontext(thread->context, (void *) func, 1, param);
 
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 
@@ -155,7 +189,7 @@ dccthread_t * dccthread_create(const char *name, void (*func)(int ), int param) 
 void dccthread_yield(void) {
 	sigprocmask(SIG_BLOCK, &mask, NULL);
 	dccthread_t * current_thread = dccthread_self();
-	dlist_push_right(threads, current_thread);
+	current_thread->yielded = 1;
 	swapcontext(current_thread->context, &manager);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
@@ -207,8 +241,8 @@ int cmp (const void * a, const void * b, void * param) {
 }
 
 // Wakes up the given thread
-void dccthread_wakeup(int sig, siginfo_t *si, void *uc) {
-	dccthread_t *thread = (dccthread_t *) si->si_value.sival_ptr;
+void dccthread_wake(int sig, siginfo_t *info, void *ucontext) {
+	dccthread_t *thread = (dccthread_t *) info->si_value.sival_ptr;
 	dlist_find_remove(sleeping_threads, thread, cmp, NULL);
 	dlist_push_right(threads, thread);
 }
@@ -219,25 +253,32 @@ void dccthread_sleep(struct timespec ts) {
 
 	dccthread_t * current_thread = dccthread_self();
 
-	timer_t st;
 	struct sigevent sse;
 	struct sigaction ssa;
 	struct itimerspec sts;
 
 	ssa.sa_flags = SA_SIGINFO;
-	ssa.sa_sigaction = dccthread_wakeup;
+	ssa.sa_sigaction = dccthread_wake;
 	ssa.sa_mask = mask;
-	sigaction(SIGRTMAX, &ssa, NULL);
+	sigaction(SIGALRM, &ssa, NULL);
 
 	sse.sigev_notify = SIGEV_SIGNAL;
-	sse.sigev_signo = SIGRTMAX;
+	sse.sigev_signo = SIGALRM;
 	sse.sigev_value.sival_ptr = current_thread;
-	timer_create(CLOCK_REALTIME, &sse, &st);
+	
+	if (timer_create(CLOCK_REALTIME, &sse, &st) != 0) {
+		perror("timer_create");
+		exit(1);
+	}
 
 	sts.it_value = ts;
 	sts.it_interval.tv_sec = 0;
 	sts.it_interval.tv_nsec = 0;
-	timer_settime(st, 0, &sts, NULL);
+	
+	if (timer_settime(st, 0, &sts, NULL) != 0) {
+		perror("timer_settime");
+		exit(1);
+	}
 
 	dlist_push_right(sleeping_threads, current_thread);
 
