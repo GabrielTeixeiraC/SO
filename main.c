@@ -1,31 +1,29 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <assert.h>
 #include "dccthread.h"
 
-void tsleep(int seconds) {
+void texit(int dummy)
+{
 	dccthread_t *self = dccthread_self();
-	struct timespec ts;
-	ts.tv_sec = seconds;
-	ts.tv_nsec = 0;
-	dccthread_sleep(ts);
-	printf("thread %s woke up and exiting\n", dccthread_name(self));
+	printf("%s exiting\n", dccthread_name(self));
 	dccthread_exit();
 }
 
-void test(int cnt) {
+void test(int cnt)
+{
+	dccthread_t *self = dccthread_self();
 	int i;
-	dccthread_t **threads = calloc(cnt, sizeof(*threads));
-	assert(threads);
 	for(i = 0; i < cnt; i++) {
 		char name[16];
-		sprintf(name, "sleep%d", i);
-		threads[i] = dccthread_create(name, tsleep, i+1);
+		sprintf(name, "t%d", i);
+		printf("%s creating %s\n", dccthread_name(self), name);
+		dccthread_t *t = dccthread_create(name, texit, 0);
+		printf("%s yielding %s\n", dccthread_name(self), name);
+		dccthread_yield();
+		printf("%s waiting %s\n", dccthread_name(self), name);
+		dccthread_wait(t);
+		printf("%s continuing\n", dccthread_name(self));
 	}
-	for(i = 0; i < cnt; i++) {
-		dccthread_wait(threads[i]);
-	}
-	printf("main thread exiting\n");
 	dccthread_exit();
 }
 
